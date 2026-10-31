@@ -121,7 +121,7 @@ export function IdealRotationSummary({
   if (table.actionCount !== 6) {
     conditions.push(`共 ${table.actionCount} 个动作，已按 ×${r2(table.sixSkillScale)} 折算为标准 6 技能一轮（权重 = 出现次数 × ${r2(table.sixSkillScale)}）`);
   }
-  if (!simResult.exact) conditions.push(`含 ${simResult.gaps.length} 项未建模效果，结果只计已建模部分`);
+  if (simResult.quality === "gaps") conditions.push(`含 ${simResult.gaps.filter((g) => (g.impact ?? "damage") === "damage").length} 项影响伤害的效果未建模，结果只计已建模部分`);
 
   const variantLine = (v: VariantRow) => {
     const role = skillRole(core, v.skillId);

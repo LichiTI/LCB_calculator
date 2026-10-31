@@ -14,6 +14,7 @@
  *   - BuffAbility_Breath.GetCriticalChanceAdder @ 0x10CA290
  */
 
+import { abilityHandler } from "./passives/framework";
 import type { AtkType, NormalizedBuff, SinAttribute } from "../config/game-data";
 import { amountSemantics, DOT_IDS, isDotId, type DotId } from "../config/status-terms";
 
@@ -108,7 +109,107 @@ export interface EvaluatedBuffModifiers {
   defenseLevelAdder: number;
   sinResistAdder: number;
 }
+/** Ability families executed generically (resource stacks, round-end conversions, skill-specific damage, etc.). */
+const VERIFIED_ABILITY_PATTERNS = [
+  /^GetStackOnSucceedAttack/,
+  /^GetStackRoundLimit/,
+  /^GiveBuffOnRoundEndDivideByOverStack\w*_\d+_\d+$/,
+  /^GiveBuffOnRoundEnd[A-Z]\w*$/,
+  /^GiveBuff(?:Stack|Turn)AdderToEnemyIfDefaultSkillNotZero$/,
+  /^AttackDmgUpSpecificSkills\w*_\d+$/,
+  /^(?:Min|Max)SpeedAdder$/,
+  /^VibrationIgnition$/,
+  /^Vibration$/,
+];
+function isVerifiedAbility(a: string): boolean {
+  return VERIFIED_BUFF_ABILITIES.has(a) || VERIFIED_ABILITY_PATTERNS.some((p) => p.test(a)) || abilityHandler(a) != null;
+}
+
+/** Linkage abilities exposed through activeAbilities() (cached per status id; hot path). */
+const GENERIC_ABILITY_RE = /^(?:GetStackOnSucceedAttack|GetStackRoundLimit|GiveBuff(?:Stack|Turn)AdderToEnemyIfDefaultSkillNotZero|AttackDmgUpSpecificSkills)/;
+const GENERIC_ABILITY_CACHE = new Map<string, { ability: string; value?: number; [k: string]: unknown }[]>();
+
+export interface ActiveAbility {
+  statusId: string;
+  potency: number;
+  count: number;
+  ability: string;
+  value?: number;
+  buffData?: { buffKeyword?: string; stack?: number; turn?: number; activeRound?: number; target?: string; value?: number; limit?: number };
+}
+
+// ---------------------------------------------------------------- status-change interceptors
+
+export type StatusChangeKind = "stack" | "turn";
+/** One raw status change before it is applied. stack = potency, turn = count; delta > 0 gain, < 0 loss. */
+export interface StatusChange {
+  owner: StatusContainer;
+  /** Resolved status id. */
+  buffId: string;
+  kind: StatusChangeKind;
+  delta: number;
+  /** Delta originally requested by the caller, before any interceptor modified it. */
+  baseDelta?: number;
+  activeRound: 0 | 1;
+  /** Free-form origin tag (e.g. "被动10101", "1101103:GiveBuffOnSucceedAttack", "roundEndDecay"); undefined for generic engine effects. */
+  source?: string;
+}
+export interface StatusReplacement {
+  buffId: string;
+  stack?: number;
+  turn?: number;
+  activeRound?: 0 | 1;
+}
+/** number → new delta (0 blocks; sign can't flip); {replaceWith} → block and apply the replacement(s) instead; undefined → unchanged. */
+export type StatusInterceptResult = number | { replaceWith: StatusReplacement | StatusReplacement[] | null } | void | undefined;
+export type StatusInterceptor = (change: StatusChange) => StatusInterceptResult;
+export interface StatusChangeEvent {
+  owner: StatusContainer;
+  buffId: string;
+  before: { potency: number; count: number };
+  after: { potency: number; count: number };
+  activeRound: 0 | 1;
+  source?: string;
+}
+export type StatusObserver = (ev: StatusChangeEvent) => void;
+/** skill: cleared by the simulator after the skill ends (and at round end); turn: cleared at round end; persistent: until `alive()` turns false. */
+export type StatusInterceptLifetime = "skill" | "turn" | "persistent";
+export interface StatusInterceptOptions {
+  scope?: StatusInterceptLifetime;
+  /** Re-registering with the same key replaces the previous entry (handlers run once per coin). */
+  key?: string;
+  /** Entry is dropped as soon as this returns false (e.g. "while status X is present"). */
+  alive?: () => boolean;
+  /** Interceptors run in ascending order (default 0); e.g. converters that react to adders use a higher order. */
+  order?: number;
+}
+interface InterceptEntry extends StatusInterceptOptions {
+  intercept?: StatusInterceptor;
+  observe?: StatusObserver;
+}
+/** Sources that bypass interceptors (internal transitions, not new gains). */
+export const STATUS_SOURCE_NEXT_ROUND = "activateNextRoundBuff";
+export const STATUS_SOURCE_CONVERT = "convert";
+/** Round-end count decay (Vibration/Charge/Breath, LoseTurnOnRoundEnd). */
+export const STATUS_SOURCE_ROUND_END = "roundEndDecay";
+/** Prefix of count loss caused by a status reacting to the attack (Burst/Laceration/Sinking trigger): `react:<id>`. */
+export const STATUS_SOURCE_REACT = "react:";
+
 export class StatusContainer {
+  private statusHooks: InterceptEntry[] = [];
+  private interceptDepth = 0;
+  /**
+   * Optional observer of active spends (consumeCount with isActiveSpend, losePotency); used by the simulator's per-action record.
+   * Receives the resolved status id and the stack (potency) / turn (count) actually removed.
+   */
+  consumeListener: ((id: string, stack: number, turn: number) => void) | null = null;
+  /**
+   * Optional observer of Vibration explosions (Tremor Burst) on this container, called by triggerVibrationExplosion after
+   * the burst is resolved (game: BuffAbility.OnVibrationExplosion). Set by the simulator to dispatch ability/passive hooks.
+   */
+  vibrationExplosionListener: ((rec: DotTriggerRecord) => void) | null = null;
+  /** Resource gained this round per keyword (for GetStackRoundLimit* caps). */
+  roundGain = new Map<string, number>();
   private readonly states = new Map<string, StatusInstance>();
   private readonly nextRoundStates = new Map<string, { potency: number; count: number }>();
   private readonly cumulativeTurnConsumed = new Map<string, number>();
@@ -133,9 +234,18 @@ export class StatusContainer {
       ].includes(id);
     }
     if (def.buffClass === "TypoOnlyBuff") return true;
+    // An explicitly empty ability list has no logic to model (pure counters / passive-driven markers).
+    if (Array.isArray(def.list) && def.list.length === 0) return true;
     const list = def.list ?? [];
     if (list.length === 0) return false;
-    return list.every((item) => VERIFIED_BUFF_ABILITIES.has(item.ability));
+    return list.every((item) => isVerifiedAbility(item.ability));
+  }
+
+  /** Abilities of a status that the calculator does not execute (empty when fully modelled). */
+  unmodelledAbilities(id: string): string[] {
+    if (this.isFullyModelled(id)) return [];
+    const def = this.buffDefs[id];
+    return (def?.list ?? []).map((x) => x.ability).filter((a) => !isVerifiedAbility(a));
   }
 
   private getBuiltInAbilities(id: string): { ability: string; value?: number; [k: string]: unknown }[] {
@@ -299,7 +409,7 @@ export class StatusContainer {
       for (const item of this.getBuiltInAbilities(inst.id)) {
         if (item.ability === "LoseStackOnAfterCheckCoin") {
           const lose = Math.max(1, Math.round(typeof item.value === "number" ? item.value : 1));
-          const { before, after } = this.consumeCount(inst.id, lose);
+          const { before, after } = this.consumeCount(inst.id, lose, false, "afterCheckCoin");
           changes.push({ statusId: inst.id, target: side, before, after, reason: "afterCheckCoinConsume" });
         }
       }
@@ -321,13 +431,185 @@ export class StatusContainer {
     for (const [k, v] of this.gainedThisTurn) {
       copy.gainedThisTurn.set(k, v);
     }
+    copy.statusHooks = [...this.statusHooks];
     return copy;
+  }
+
+  /** Register a filter applied to every status gain / count or potency loss on this container. */
+  addStatusInterceptor(fn: StatusInterceptor, opts: StatusInterceptOptions = {}): void {
+    this.addHook({ ...opts, intercept: fn });
+  }
+
+  /** Register a listener called after every effective status change on this container. */
+  addStatusObserver(fn: StatusObserver, opts: StatusInterceptOptions = {}): void {
+    this.addHook({ ...opts, observe: fn });
+  }
+
+  /** Drop interceptors/observers of a lifetime ("turn" also drops "skill"; "all" drops everything). */
+  clearStatusInterceptors(scope: StatusInterceptLifetime | "all"): void {
+    if (scope === "all") this.statusHooks = [];
+    else if (scope === "turn") this.statusHooks = this.statusHooks.filter((e) => e.scope !== "turn" && e.scope !== "skill");
+    else this.statusHooks = this.statusHooks.filter((e) => (e.scope ?? "persistent") !== scope);
+  }
+
+  private addHook(e: InterceptEntry): void {
+    if (e.key) {
+      const i = this.statusHooks.findIndex((x) => x.key === e.key && !x.intercept === !e.intercept);
+      if (i >= 0) {
+        this.statusHooks[i] = e;
+        return;
+      }
+    }
+    const at = this.statusHooks.findIndex((x) => (x.order ?? 0) > (e.order ?? 0));
+    if (at < 0) this.statusHooks.push(e);
+    else this.statusHooks.splice(at, 0, e);
+  }
+
+  private liveHooks(): InterceptEntry[] {
+    if (this.statusHooks.length === 0) return this.statusHooks;
+    this.statusHooks = this.statusHooks.filter((e) => !e.alive || e.alive());
+    return this.statusHooks;
+  }
+
+  private interceptDelta(buffId: string, kind: StatusChangeKind, delta: number, activeRound: 0 | 1, source: string | undefined, replace: StatusReplacement[]): number {
+    if (delta === 0 || this.interceptDepth > 4 || source === STATUS_SOURCE_NEXT_ROUND || source === STATUS_SOURCE_CONVERT) return delta;
+    const list = this.liveHooks().filter((e) => e.intercept);
+    if (list.length === 0) return delta;
+    this.interceptDepth++;
+    try {
+      const baseDelta = delta;
+      for (const e of list) {
+        const r = e.intercept!({ owner: this, buffId, kind, delta, baseDelta, activeRound, source });
+        if (r == null) continue;
+        if (typeof r === "number") {
+          const v = Math.trunc(r);
+          delta = v === 0 || Math.sign(v) !== Math.sign(delta) ? 0 : v;
+        } else {
+          if (r.replaceWith) replace.push(...(Array.isArray(r.replaceWith) ? r.replaceWith : [r.replaceWith]));
+          delta = 0;
+        }
+        if (delta === 0) break;
+      }
+    } finally {
+      this.interceptDepth--;
+    }
+    return delta;
+  }
+
+  private notifyChange(buffId: string, before: { potency: number; count: number }, after: { potency: number; count: number }, activeRound: 0 | 1, source: string | undefined): void {
+    if (before.potency === after.potency && before.count === after.count) return;
+    for (const e of this.liveHooks()) {
+      if (e.observe) e.observe({ owner: this, buffId, before, after, activeRound, source });
+    }
+  }
+
+  private applyReplacements(replace: StatusReplacement[], activeRound: 0 | 1, source: string | undefined): void {
+    if (replace.length === 0) return;
+    this.interceptDepth++;
+    try {
+      for (const r of replace) this.apply(r.buffId, r.stack ?? 0, r.turn ?? 0, r.activeRound ?? activeRound, `replace:${source ?? ""}`);
+    } finally {
+      this.interceptDepth--;
+    }
   }
 
   /**
    * Resolve a keyword to the actual stored status. Unique variants declare their base keyword in
    * subIdList (e.g. ChargeNoirAlly -> Charge) and are treated as that keyword by effect checks.
    */
+  /** Number of active statuses whose buffType matches (e.g. "Negative"). */
+  countByBuffType(type: string): number {
+    let n = 0;
+    for (const inst of this.states.values()) {
+      if ((inst.potency > 0 || inst.count > 0) && this.buffDefs[inst.id]?.buffType === type) n++;
+    }
+    return n;
+  }
+
+  /** All BuffAbilities of currently active statuses (with the owning status' amounts). */
+  activeAbilities(): ActiveAbility[] {
+    const out: ActiveAbility[] = [];
+    for (const inst of this.states.values()) {
+      if (inst.potency <= 0 && inst.count <= 0) continue;
+      let items = GENERIC_ABILITY_CACHE.get(inst.id);
+      if (!items) {
+        items = this.getBuiltInAbilities(inst.id).filter((x) => GENERIC_ABILITY_RE.test(x.ability));
+        GENERIC_ABILITY_CACHE.set(inst.id, items);
+      }
+      for (const item of items) {
+        out.push({ statusId: inst.id, potency: inst.potency, count: inst.count, ability: item.ability, value: typeof item.value === "number" ? item.value : undefined, buffData: item.buffData as ActiveAbility["buffData"] });
+      }
+    }
+    return out;
+  }
+
+  /** Gain resource stacks honoring GetStackRoundLimit* (SystemAbility_CheckStack*.AddStackCheckRoundLimit). */
+  gainLimited(rawId: string, amount: number): { before: { potency: number; count: number }; after: { potency: number; count: number }; gained: number } {
+    const id = this.resolveId(rawId);
+    const list = (this.buffDefs[id]?.list ?? this.buffDefs[rawId]?.list ?? []) as { ability: string; value?: number }[];
+    const lim = list.find((x) => /^GetStackRoundLimit/.test(x.ability));
+    let add = Math.max(0, amount);
+    if (lim && typeof lim.value === "number") {
+      const used = this.roundGain.get(rawId) ?? 0;
+      add = Math.max(0, Math.min(add, lim.value - used));
+      this.roundGain.set(rawId, used + add);
+    }
+    const r = add > 0 ? this.apply(rawId, add, 0, 0) : { before: { potency: this.getPotency(rawId), count: this.getCount(rawId) }, after: { potency: this.getPotency(rawId), count: this.getCount(rawId) } };
+    return { ...r, gained: add };
+  }
+
+  /** Reduce potency (stack) of a status, e.g. LoseBuffOnStartTurn / UseBuff* consuming potency. */
+  losePotency(rawId: string, amount: number, source?: string): { before: { potency: number; count: number }; after: { potency: number; count: number } } | null {
+    if (this.statusHooks.length === 0) return this.losePotencyRaw(rawId, amount);
+    const id = this.resolveId(rawId);
+    const replace: StatusReplacement[] = [];
+    const amt = -this.interceptDelta(id, "stack", -Math.max(0, Math.trunc(amount)), 0, source, replace);
+    const r = this.losePotencyRaw(rawId, amt);
+    if (r) this.notifyChange(id, r.before, r.after, 0, source);
+    this.applyReplacements(replace, 0, source);
+    return r;
+  }
+
+  private losePotencyRaw(rawId: string, amount: number): { before: { potency: number; count: number }; after: { potency: number; count: number } } | null {
+    const inst = this.get(rawId);
+    if (!inst || amount <= 0) return null;
+    const before = { potency: inst.potency, count: inst.count };
+    inst.potency = Math.max(0, inst.potency - amount);
+    if (this.isSingleDim(inst.buffClass)) inst.count = inst.potency;
+    if (this.consumeListener && before.potency > inst.potency) {
+      this.consumeListener(inst.id, before.potency - inst.potency, Math.max(0, before.count - inst.count));
+    }
+    if (inst.potency <= 0) this.states.delete(inst.id);
+    const cur = this.get(rawId);
+    return { before, after: cur ? { potency: cur.potency, count: cur.count } : { potency: 0, count: 0 } };
+  }
+
+  /** Replace one status by another keeping amounts (SwitchVibration: Vibration -> VibrationIgnition). */
+  convert(fromId: string, toId: string): { before: { potency: number; count: number }; after: { potency: number; count: number } } | null {
+    const inst = this.states.get(fromId);
+    if (!inst || (inst.potency <= 0 && inst.count <= 0)) return null;
+    const amt = { potency: inst.potency, count: inst.count };
+    this.states.delete(fromId);
+    const { after } = this.apply(toId, amt.potency, amt.count, 0, STATUS_SOURCE_CONVERT);
+    return { before: amt, after };
+  }
+
+  /** AttackDmgUpSpecificSkills*_<skillId>: value × stack for that skill. */
+  specificSkillDmgBonus(skillId: number): number {
+    let v = 0;
+    for (const a of this.activeAbilities()) {
+      const m = /^AttackDmgUpSpecificSkills\w*_(\d+)$/.exec(a.ability);
+      if (m && Number(m[1]) === skillId) v += (a.value ?? 0) * Math.max(1, a.potency);
+    }
+    return v;
+  }
+
+  private queueNext(id: string, potency: number, count: number): void {
+    if (potency <= 0 && count <= 0) return;
+    const prev = this.nextRoundStates.get(id) ?? { potency: 0, count: 0 };
+    this.nextRoundStates.set(id, { potency: prev.potency + potency, count: prev.count + count });
+  }
+
   resolveId(id: string): string {
     const s = this.states.get(id);
     if (s && (s.potency > 0 || s.count > 0)) return id;
@@ -402,6 +684,33 @@ export class StatusContainer {
    *     * Single-dimension stack (stored in potency; count mirrors potency for countOnlyFromStack).
    */
   apply(
+    rawId: string,
+    addPotency: number,
+    addCount: number,
+    activeRound: 0 | 1 = 0,
+    source?: string,
+  ): { before: { potency: number; count: number }; after: { potency: number; count: number } } {
+    if (this.statusHooks.length === 0) return this.applyRaw(rawId, addPotency, addCount, activeRound);
+    const id = this.resolveId(rawId);
+    const replace: StatusReplacement[] = [];
+    let p = Math.max(0, Math.trunc(addPotency));
+    let c = Math.max(0, Math.trunc(addCount));
+    if (this.isSingleDim(this.getMeta(id).buffClass)) {
+      // single-dimension stack: whichever input is used becomes the stack delta
+      const d = this.interceptDelta(id, "stack", p > 0 ? p : c, activeRound, source, replace);
+      p = d;
+      c = 0;
+    } else {
+      p = this.interceptDelta(id, "stack", p, activeRound, source, replace);
+      c = this.interceptDelta(id, "turn", c, activeRound, source, replace);
+    }
+    const r = this.applyRaw(rawId, p, c, activeRound);
+    if (activeRound === 0) this.notifyChange(id, r.before, r.after, activeRound, source);
+    this.applyReplacements(replace, activeRound, source);
+    return r;
+  }
+
+  private applyRaw(
     rawId: string,
     addPotency: number,
     addCount: number,
@@ -499,6 +808,22 @@ export class StatusContainer {
     id: string,
     amount: number,
     isActiveSpend = true,
+    source?: string,
+  ): { before: { potency: number; count: number }; after: { potency: number; count: number } } {
+    if (this.statusHooks.length === 0) return this.consumeCountRaw(id, amount, isActiveSpend);
+    const resolved = this.resolveId(id);
+    const replace: StatusReplacement[] = [];
+    const want = -this.interceptDelta(resolved, "turn", -Math.max(0, Math.trunc(amount)), 0, source, replace);
+    const r = this.consumeCountRaw(id, want, isActiveSpend);
+    this.notifyChange(resolved, r.before, r.after, 0, source);
+    this.applyReplacements(replace, 0, source);
+    return r;
+  }
+
+  private consumeCountRaw(
+    id: string,
+    amount: number,
+    isActiveSpend = true,
   ): { before: { potency: number; count: number }; after: { potency: number; count: number } } {
     const resolved = this.resolveId(id);
     const inst = this.states.get(resolved);
@@ -519,6 +844,9 @@ export class StatusContainer {
       if (gained > 0) {
         inst.potency = Math.min(inst.maxPotency, inst.potency + gained);
       }
+    }
+    if (this.consumeListener && isActiveSpend && actual > 0) {
+      this.consumeListener(resolved, this.isSingleDim(inst.buffClass) ? actual : 0, actual);
     }
     this.checkDestroy(inst);
     const cur = this.states.get(resolved);
@@ -584,12 +912,26 @@ export class StatusContainer {
   onRoundEndDecay(): StatusChangeRecord[] {
     const changes: StatusChangeRecord[] = [];
     for (const [id, inst] of [...this.states.entries()]) {
+      for (const item of this.getBuiltInAbilities(id)) {
+        const bd = item.buffData as ActiveAbility["buffData"];
+        if (!bd?.buffKeyword) continue;
+        const ov = /^GiveBuffOnRoundEndDivideByOverStack\w*_(\d+)_(\d+)$/.exec(item.ability);
+        if (ov) {
+          const min = Number(ov[1]);
+          const max = Number(ov[2]);
+          if (inst.potency >= min) {
+            this.queueNext(bd.buffKeyword, Math.trunc((inst.potency - min) / Math.max(1, bd.stack ?? 1)), inst.potency >= max ? bd.turn ?? 0 : 0);
+          }
+        } else if (/^GiveBuffOnRoundEnd[A-Z]\w*$/.test(item.ability)) {
+          this.queueNext(bd.buffKeyword, bd.stack ?? 0, bd.turn ?? 0);
+        }
+      }
       if (inst.buffClass === "VolatileBuff" || inst.buffClass === "VolatileResistBuff") {
         const before = { potency: inst.potency, count: inst.count };
         this.states.delete(id);
         changes.push({ statusId: id, target: "target", before, after: { potency: 0, count: 0 }, reason: "roundEndExpire" });
       } else if (id === "Vibration" || id === "Breath" || id === "Charge") {
-        const { before, after } = this.consumeCount(id, 1, false);
+        const { before, after } = this.consumeCount(id, 1, false, STATUS_SOURCE_ROUND_END);
         changes.push({ statusId: id, target: "target", before, after, reason: "roundEndCountDecay" });
       } else {
         for (const item of this.getBuiltInAbilities(id)) {
@@ -615,7 +957,7 @@ export class StatusContainer {
               reason: item.ability,
             });
           } else if (item.ability === "LoseTurnOnRoundEnd") {
-            const { before, after } = this.consumeCount(id, val, false);
+            const { before, after } = this.consumeCount(id, val, false, STATUS_SOURCE_ROUND_END);
             changes.push({ statusId: id, target: "target", before, after, reason: "LoseTurnOnRoundEnd" });
           }
         }
@@ -624,12 +966,14 @@ export class StatusContainer {
     // Activate next-round buffs
     for (const [id, queued] of this.nextRoundStates.entries()) {
       if (queued.potency > 0 || queued.count > 0) {
-        const { before, after } = this.apply(id, queued.potency, queued.count, 0);
+        const { before, after } = this.apply(id, queued.potency, queued.count, 0, STATUS_SOURCE_NEXT_ROUND);
         changes.push({ statusId: id, target: "target", before, after, reason: "activateNextRoundBuff" });
       }
     }
     this.nextRoundStates.clear();
+    this.clearStatusInterceptors("turn");
     this.gainedThisTurn.clear();
+    this.roundGain.clear();
     return changes;
   }
 }
@@ -646,7 +990,7 @@ export function triggerCombustionOnRoundEnd(
   if (!burn || burn.potency <= 0 || burn.count <= 0) return null;
   const potency = burn.potency;
   const countBefore = burn.count;
-  const { after } = statuses.consumeCount("Combustion", 1);
+  const { after } = statuses.consumeCount("Combustion", 1, false);
   return {
     turn,
     statusId: "Combustion",
@@ -674,7 +1018,7 @@ export function triggerLacerationOnAttackCoinToss(
   if (!bleed || bleed.potency <= 0 || bleed.count <= 0) return null;
   const potency = bleed.potency;
   const countBefore = bleed.count;
-  const { after } = statuses.consumeCount("Laceration", 1);
+  const { after } = statuses.consumeCount("Laceration", 1, false, `${STATUS_SOURCE_REACT}Laceration`);
   return {
     turn,
     statusId: "Laceration",
@@ -702,7 +1046,7 @@ export function triggerBurstOnHit(
   if (!burst || burst.potency <= 0 || burst.count <= 0) return null;
   const potency = burst.potency;
   const countBefore = burst.count;
-  const { after } = statuses.consumeCount("Burst", 1);
+  const { after } = statuses.consumeCount("Burst", 1, false, `${STATUS_SOURCE_REACT}Burst`);
   return {
     turn,
     statusId: "Burst",
@@ -734,7 +1078,7 @@ export function triggerSinkingOnHit(
   if (!sinking || sinking.potency <= 0 || sinking.count <= 0) return null;
   const potency = sinking.potency;
   const countBefore = sinking.count;
-  const { after } = statuses.consumeCount("Sinking", 1);
+  const { after } = statuses.consumeCount("Sinking", 1, false, `${STATUS_SOURCE_REACT}Sinking`);
   const hpDamage = targetHasSp ? 0 : Math.max(0, Math.round(potency * gloomResist));
   const spDamage = targetHasSp ? potency : 0;
   return {
@@ -793,8 +1137,28 @@ export function triggerVibrationExplosion(
   turn: number,
   sourceDesc: string,
 ): DotTriggerRecord | null {
+  const rec = resolveVibrationExplosion(statuses, turn, sourceDesc);
+  if (rec) statuses.vibrationExplosionListener?.(rec);
+  return rec;
+}
+
+function resolveVibrationExplosion(statuses: StatusContainer, turn: number, sourceDesc: string): DotTriggerRecord | null {
   const vib = statuses.get("Vibration");
   if (!vib || vib.potency <= 0 || vib.count <= 0) return null;
+  if (vib.id === "VibrationIgnition") {
+    // BuffAbility_VibrationIgnition (0.5): burst deals (Ignition + own Burn potency) × 0.5 Wrath damage and consumes 1 Burn count.
+    const burn = statuses.get("Combustion");
+    const hp = Math.floor((vib.potency + (burn?.potency ?? 0)) * 0.5);
+    if (burn) statuses.consumeCount("Combustion", 1, false);
+    return { turn, statusId: "Vibration", trigger: "vibrationExplosion", potencyAtTrigger: vib.potency, countBefore: vib.count, countAfter: vib.count, hpDamage: hp, spDamage: 0, staggerShift: vib.potency, sourceDesc: `${sourceDesc}（震颤-灼热：(${vib.potency}+烧伤${burn?.potency ?? 0})×0.5）` };
+  }
+  if (vib.id === "VibrationBleeding") {
+    // BuffAbility_VibrationBleeding (0.5): explosion deals (own Vibration + Laceration potency) × 0.5 Lust damage, Laceration count −1.
+    const bleed = statuses.get("Laceration");
+    const hp = Math.floor((vib.potency + (bleed?.potency ?? 0)) * 0.5);
+    if (bleed) statuses.consumeCount("Laceration", 1, false);
+    return { turn, statusId: "Vibration", trigger: "vibrationExplosion", potencyAtTrigger: vib.potency, countBefore: vib.count, countAfter: vib.count, hpDamage: hp, spDamage: 0, staggerShift: vib.potency, sourceDesc: `${sourceDesc}（震颤-大出血：(${vib.potency}+流血${bleed?.potency ?? 0})×0.5）` };
+  }
   return {
     turn,
     statusId: "Vibration",

@@ -15,7 +15,10 @@ import { RotationDamageTable } from "./RotationDamageTable";
 import { QuickSkillSheet, type SkillCaseRow } from "./QuickSkillSheet";
 import { LlmAdvisorSection } from "./LlmAdvisorPanel";
 import { IdealRotationSummary } from "./IdealRotationSummary";
+import { GapList, QualityBadge } from "./GapList";
+import { BattleContextGroup } from "./BattleContextGroup";
 import { SIN_LABEL } from "./labels";
+import { UnitKeywordInput } from "./UnitKeywordInput";
 
 const COMMON_STATUS_IDS = [
   ...DOT_IDS,
@@ -230,6 +233,7 @@ export function ResultPage({
   const [optResult, setOptResult] = useState<OptimizeResult | null>(null);
   const [optRunning, setOptRunning] = useState(false);
   const [optMode, setOptMode] = useState<"math" | "llm">("llm");
+  const [optRankEv, setOptRankEv] = useState(false);
   const [llmInjectedRows, setLlmInjectedRows] = useState<SkillCaseRow[] | null>(null);
 
   const bonusTier: BonusTier = (() => {
@@ -254,6 +258,8 @@ export function ResultPage({
         slots: optSlots,
         turns: optTurns,
         coinMode: coinMode === "monteCarlo" ? "allHeads" : coinMode,
+        rankBy: optRankEv ? "expected" : "allHeads",
+        expected: { seed },
       });
       setOptResult(r);
       setOptRunning(false);
@@ -277,6 +283,12 @@ export function ResultPage({
       { coinMode, seed, samples },
     );
   }, [core, preset, blocked, coinMode, seed, samples]);
+
+  /** Monte Carlo mode: all-heads reference total shown next to the expected value. */
+  const allHeadsTotal = useMemo(() => {
+    if (!preset || blocked || coinMode !== "monteCarlo") return null;
+    return simulateScenario({ identities: core.identities, skills: core.skills, buffs: core.buffs }, preset, { coinMode: "allHeads" }).totals.total;
+  }, [core, preset, blocked, coinMode]);
 
   const setTargetField = (patch: Record<string, unknown>) => {
     if (!preset) return;
@@ -315,6 +327,14 @@ export function ResultPage({
     ? (preset!.scenario as { enemyActions: { turn: number; coinCount: number }[] }).enemyActions
     : [];
   const t1EnemyCoins = enemyActions.find((a) => a.turn === 1)?.coinCount ?? 0;
+  const knownUnitKeywords = useMemo(() => {
+    const s = new Set<string>();
+    for (const i of core.identities as { unitKeywords?: string[]; associations?: string[] }[]) {
+      for (const k of i.unitKeywords ?? []) s.add(k);
+      for (const k of i.associations ?? []) s.add(k);
+    }
+    return [...s];
+  }, [core]);
 
   const filteredEvents = useMemo(() => {
     if (!simResult) return [];
@@ -513,6 +533,49 @@ export function ResultPage({
                     }}
                   />
                 </label>
+                <label className="field" title="用于“目标体力低于/不低于N%”等条件（默认100%）">
+                  <span>目标初始体力%</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={Math.round((typeof targetObj.hpRatio === "number" ? targetObj.hpRatio : 1) * 100)}
+                    onChange={(e) => setTargetField({ hpRatio: Math.min(100, Math.max(0, Number(e.target.value) || 0)) / 100 })}
+                  />
+                </label>
+                <label className="field" title="目标已失去体力比例等于 100% − 初始体力%；与「战斗情境」中的已损失体力联动">
+                  <span>自身初始体力%</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={100 - Math.round(Number(((preset.scenario ?? {}) as { battle?: { lostHpPct?: unknown } }).battle?.lostHpPct) || 0)}
+                    onChange={(e) => {
+                      const sc = (preset.scenario ?? {}) as Record<string, unknown>;
+                      const b = (sc.battle ?? {}) as Record<string, unknown>;
+                      const lost = 100 - Math.min(100, Math.max(1, Math.trunc(Number(e.target.value) || 100)));
+                      setPreset({ ...preset, scenario: { ...sc, battle: { ...b, lostHpPct: lost } } });
+                    }}
+                  />
+                </label>
+                <label className="field" title="仅在勾选“体力随伤害下降”时使用；留空则取目标体力或 1000000">
+                  <span>目标最大体力</span>
+                  <input
+                    type="number"
+                    min={1}
+                    placeholder="默认"
+                    value={typeof targetObj.maxHp === "number" ? targetObj.maxHp : ""}
+                    onChange={(e) => setTargetField({ maxHp: e.target.value === "" ? undefined : Math.max(1, Math.trunc(Number(e.target.value) || 1)) })}
+                  />
+                </label>
+                <label className="field inline" title="关闭时目标体力比例固定为初始值">
+                  <input
+                    type="checkbox"
+                    checked={targetObj.hpTracking === true}
+                    onChange={(e) => setTargetField({ hpTracking: e.target.checked })}
+                  />
+                  <span>目标体力随伤害下降</span>
+                </label>
               </div>
               <div className="chips" style={{ marginTop: 8, marginBottom: 0 }}>
                 <span className="muted small" style={{ alignSelf: "center" }}>
@@ -552,6 +615,11 @@ export function ResultPage({
                   <span>按全暴击结算（呼吸法满暴）</span>
                 </label>
               </div>
+              <UnitKeywordInput
+                value={Array.isArray(targetObj.unitKeywords) ? (targetObj.unitKeywords as unknown[]).filter((k): k is string => typeof k === "string") : []}
+                known={knownUnitKeywords}
+                onChange={(v) => setTargetField({ unitKeywords: v.length ? v : undefined })}
+              />
               {!simple && (
               <label className="field full" style={{ marginTop: 10 }}>
                 <span>战斗被动策略</span>
@@ -567,6 +635,8 @@ export function ResultPage({
               </label>
               )}
             </div>
+
+            <BattleContextGroup preset={preset} setPreset={setPreset} identitySpeed={core.identities.find((i) => i.id === preset.actor.identityId)?.speed ?? null} />
 
             <div className="group">
               <div className="group-title">
@@ -734,7 +804,7 @@ export function ResultPage({
               <>
                 <IdealRotationSummary core={core} text={text} preset={preset} simResult={simResult} bonusTier={bonusTier} />
 
-                <div className={`hero-result ${simResult.exact ? "" : "inexact"}`}>
+                <div className={`hero-result ${simResult.quality === "gaps" ? "inexact" : ""}`}>
                   <div className="hero-top">
                     <div>
                       <h3>结果总览 · 模拟全程总伤（按排轴逐回合，未折算 6 技能轮）</h3>
@@ -742,13 +812,43 @@ export function ResultPage({
                         {simResult.totals.total}
                         <small>HP</small>
                       </div>
+                      {simResult.totals.ally != null && (
+                        <div className="ev-summary" style={{ marginTop: 4 }}>
+                          <span className="muted small">友方联合攻击 </span>
+                          <b>{simResult.totals.ally}</b>
+                          <span className="muted small">
+                            {(preset.scenario as { battle?: { countAllyDamage?: boolean } } | undefined)?.battle?.countAllyDamage
+                              ? "（已计入上方总伤）"
+                              : `（未计入；自身+友方 ${simResult.totals.total + simResult.totals.ally}）`}
+                          </span>
+                        </div>
+                      )}
+                      {simResult.totals.subTarget != null && (
+                        <div className="ev-summary" style={{ marginTop: 4 }}>
+                          <span className="muted small">主目标 </span>
+                          <b>{simResult.totals.total}</b>
+                          <span className="muted small"> ｜ 副目标 </span>
+                          <b>{simResult.totals.subTarget}</b>
+                          <span className="muted small"> ｜ 全部目标合计 </span>
+                          <b style={{ color: "var(--p-300)" }}>{simResult.totals.total + simResult.totals.subTarget}</b>
+                          <div className="muted small">副目标视为与主目标相同（耐性/状态相同）；仅含硬币直接伤害与“全体目标”追加伤害，不含副目标身上的状态触发</div>
+                        </div>
+                      )}
+                      {simResult.monteCarlo && (
+                        <div className="ev-summary" style={{ marginTop: 4 }}>
+                          <span className="muted small">全正面 </span>
+                          <b>{allHeadsTotal ?? "—"}</b>
+                          <span className="muted small"> ｜ 期望值 </span>
+                          <b style={{ color: "var(--p-300)" }}>{simResult.monteCarlo.mean.toFixed(1)}</b>
+                          <span className="muted small">
+                            {" "}（P10–P90 {simResult.monteCarlo.p10.toFixed(0)}–{simResult.monteCarlo.p90.toFixed(0)}，中位 {simResult.monteCarlo.p50.toFixed(0)}，σ {simResult.monteCarlo.std.toFixed(1)}）
+                          </span>
+                          <div className="muted small">大字与下方分项为第 1 个样本；期望值为 {simResult.monteCarlo.samples} 个样本均值（种子 {simResult.monteCarlo.seed}）</div>
+                        </div>
+                      )}
                     </div>
                     <div style={{ textAlign: "right" }}>
-                      {simResult.exact ? (
-                        <span className="tag ok">✓ 已完全建模（精确结论）</span>
-                      ) : (
-                        <span className="tag err">⚠ 含未建模缺口（共 {simResult.gaps.length} 项，不可宣称为精确总伤）</span>
-                      )}
+                      <QualityBadge result={simResult} />
                       <div className="muted small" style={{ marginTop: 6 }}>
                         规则版本：{simResult.rulesVersion}
                       </div>
@@ -803,31 +903,15 @@ export function ResultPage({
 
                   {simResult.monteCarlo && (
                     <div className="mc-line">
-                      Monte Carlo 抽样（{simResult.monteCarlo.samples} 样本）：期望总伤{" "}
-                      <b>{simResult.monteCarlo.mean.toFixed(2)}</b> ± {simResult.monteCarlo.stderr.toFixed(2)}（观测区间{" "}
+                      Monte Carlo 期望值（{simResult.monteCarlo.samples} 样本）：期望总伤{" "}
+                      <b>{simResult.monteCarlo.mean.toFixed(2)}</b> ± {simResult.monteCarlo.stderr.toFixed(2)}（标准误），标准差 {simResult.monteCarlo.std.toFixed(2)}；观测区间{" "}
                       <b>{simResult.monteCarlo.observedMin}</b> – <b>{simResult.monteCarlo.observedMax}</b>；期望直伤{" "}
-                      {simResult.monteCarlo.meanDirect.toFixed(2)}，期望 DOT {simResult.monteCarlo.meanDot.toFixed(2)}）
+                      {simResult.monteCarlo.meanDirect.toFixed(2)}，期望追伤 {simResult.monteCarlo.meanExtra.toFixed(2)}，期望 DOT {simResult.monteCarlo.meanDot.toFixed(2)}，期望沉沦 SP {simResult.monteCarlo.meanDotSp.toFixed(2)}
                     </div>
                   )}
                 </div>
 
-                {simResult.gaps.length > 0 && (
-                  <div className="callout warn" style={{ marginTop: 16 }}>
-                    <div className="callout-body">
-                      <b style={{ marginBottom: 6 }}>未覆盖效果 / 场景缺口（阻断精确结论，可通过技能组手动修正补偿）</b>
-                      <ul className="gap-list">
-                        {simResult.gaps.map((g, i) => (
-                          <li key={i}>
-                            <span className="tag warn">{g.kind}</span>
-                            <div>
-                              <code>{g.id}</code> {g.where ? <span className="muted">({g.where})</span> : null} {g.message}
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-                )}
+                <GapList result={simResult} text={text} />
 
 
                 <ExternalBuffsPanel
@@ -961,6 +1045,9 @@ export function ResultPage({
                       >
                         6T 双槽（12动作 · 13860种）
                       </button>
+                      <label className="chip" title="用 Monte Carlo（公共随机数，筛选 16 样本 + 前 15 名 150 样本复评）按期望总伤排序；3600/13860 种时先按全正面取前 120 名再抽样">
+                        <input type="checkbox" checked={optRankEv} onChange={(e) => { setOptRankEv(e.target.checked); setOptResult(null); }} /> 按期望值排序
+                      </label>
                       <button type="button" className="primary" onClick={runOptimizer} disabled={optRunning}>
                         {optRunning ? "穷举中…" : "开始穷举"}
                       </button>
@@ -1046,6 +1133,12 @@ export function ResultPage({
                               <div className="k">已穷举方案数</div>
                               <div className="v">{optResult.evaluated}{optResult.truncated ? "+（已截断）" : ""}</div>
                             </div>
+                            <div>
+                              <div className="k">排序依据 / 耗时</div>
+                              <div className="v small">
+                                {optResult.rankBy === "expected" ? `期望值 ${optResult.best.ev ? optResult.best.ev.mean.toFixed(1) : "—"}` : "全正面"} · {((optResult.elapsedMs ?? 0) / 1000).toFixed(1)}s
+                              </div>
+                            </div>
                             <button type="button" className="primary" onClick={applyBestSchedule}>
                               应用最佳排轴到当前预设
                             </button>
@@ -1062,6 +1155,7 @@ export function ResultPage({
                                   <th className="num">DOT</th>
                                   <th className="num">{optResult.turns}T总伤</th>
                                   <th className="num">折算6技能轮伤</th>
+                                  {optResult.rankBy === "expected" && <th className="num">期望总伤（P10–P90）</th>}
                                 </tr>
                               </thead>
                               <tbody>
@@ -1081,6 +1175,11 @@ export function ResultPage({
                                     <td className="num">{c.dotHp}</td>
                                     <td className="num">{c.total}</td>
                                     <td className="num"><b style={{ color: "var(--p-300)" }}>{c.wheelTotal}</b></td>
+                                    {optResult.rankBy === "expected" && (
+                                      <td className="num">
+                                        {c.ev ? `${c.ev.mean.toFixed(1)}（${c.ev.p10.toFixed(0)}–${c.ev.p90.toFixed(0)}）` : "—"}
+                                      </td>
+                                    )}
                                   </tr>
                                 ))}
                               </tbody>

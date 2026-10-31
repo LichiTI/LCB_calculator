@@ -9,7 +9,7 @@
  * and reports both raw total damage and normalized 6-skill wheel damage.
  */
 import type { Preset } from "../config/preset-types";
-import { simulateScenario, type CoinMode, type SimulationData, type SimulationResult } from "./simulator";
+import { simulateExpected, simulateScenario, type CoinMode, type MonteCarloStats, type SimulationData, type SimulationResult } from "./simulator";
 
 export interface ScheduleCandidate {
   /** entryIds per turn (length = turns, each with 1 or 2 entries). */
@@ -20,6 +20,10 @@ export interface ScheduleCandidate {
   direct: number;
   dotHp: number;
   exact: boolean;
+  /** Expected-value stats (rankBy "expected" only): Monte Carlo with common random numbers. */
+  ev?: Pick<MonteCarloStats, "samples" | "mean" | "std" | "p10" | "p50" | "p90">;
+  /** ev.mean normalized to a 6-skill wheel. */
+  evWheel?: number;
 }
 
 export interface OptimizeResult {
@@ -31,6 +35,25 @@ export interface OptimizeResult {
   worst: ScheduleCandidate | null;
   top: ScheduleCandidate[];
   bestResult: SimulationResult | null;
+  /** Ranking key used (default "allHeads" = deterministic coinMode total). */
+  rankBy?: "allHeads" | "expected";
+  /** Wall time of the optimization in ms. */
+  elapsedMs?: number;
+}
+
+export interface ExpectedRankOptions {
+  /** Screening samples per candidate (default 16). */
+  samples?: number;
+  /** Re-evaluate the best `refineTop` screened candidates with `refineSamples` samples (defaults 15 / 150). */
+  refineTop?: number;
+  refineSamples?: number;
+  /** Seed shared by every candidate (common random numbers; default 20261030). */
+  seed?: number;
+  /**
+   * Candidate spaces above max(prefilter, 600) (12T single 3,600 / 6T double 13,860): only the `prefilter` best by the
+   * deterministic total (default 120) are Monte Carlo-screened, to keep runtime reasonable.
+   */
+  prefilter?: number;
 }
 
 function* multisetPermutations(items: string[]): Generator<string[]> {
@@ -84,8 +107,28 @@ function* candidateOrders(poolPerDeck: string[], turns: number, slots: 1 | 2): G
 export function optimizeSchedule(
   data: SimulationData,
   preset: Preset,
-  opts: { slots: 1 | 2; coinMode?: CoinMode; turns?: number; maxCandidates?: number; topN?: number },
+  opts: {
+    slots: 1 | 2;
+    coinMode?: CoinMode;
+    turns?: number;
+    maxCandidates?: number;
+    topN?: number;
+    /** "expected": rank by Monte Carlo mean (CRN, screen + refine); default "allHeads" ranks by the deterministic total. */
+    rankBy?: "allHeads" | "expected";
+    expected?: ExpectedRankOptions;
+  },
 ): OptimizeResult {
+  const t0 = Date.now();
+  const rankBy = opts.rankBy ?? "allHeads";
+  const evOpt = opts.expected ?? {};
+  const evSeed = evOpt.seed ?? 20261030;
+  const evSamples = Math.max(1, Math.trunc(evOpt.samples ?? 16));
+  const refineTop = Math.max(0, Math.trunc(evOpt.refineTop ?? 15));
+  const refineSamples = Math.max(evSamples, Math.trunc(evOpt.refineSamples ?? 150));
+  const prefilter = Math.max(refineTop, Math.trunc(evOpt.prefilter ?? 120));
+  /** Up to this many candidates every one is Monte Carlo-screened; beyond it the deterministic prefilter applies. */
+  const prefilterFrom = Math.max(prefilter, 600);
+  const key = (c: ScheduleCandidate) => (rankBy === "expected" ? c.ev?.mean ?? c.total : c.total);
   const turns = opts.turns ?? 6;
   const slots = opts.slots;
   const maxCandidates = opts.maxCandidates ?? 20000;
@@ -98,11 +141,18 @@ export function optimizeSchedule(
   const totalActions = Math.max(1, turns * slots);
   const wheelScale = 6 / totalActions;
 
-  const ranked: ScheduleCandidate[] = [];
   let best: ScheduleCandidate | null = null;
   let worst: ScheduleCandidate | null = null;
   let evaluated = 0;
   let truncated = false;
+  const pool: ScheduleCandidate[] = [];
+  const schedulePreset = (c: ScheduleCandidate): Preset => ({
+    ...preset,
+    simulation: {
+      ...preset.simulation, mode: "orderedCycle", turnCount: turns,
+      actionSchedule: c.turns.flatMap((ids, t) => ids.map((entryId, k) => ({ turn: t + 1, order: k + 1, entryId }))),
+    },
+  });
 
   for (const order of candidateOrders(poolPerDeck, turns, slots)) {
     if (evaluated >= maxCandidates) {
@@ -124,15 +174,32 @@ export function optimizeSchedule(
       dotHp: r.totals.dotHp,
       exact: r.exact,
     };
-    if (!best || cand.total > best.total) best = cand;
-    if (!worst || cand.total < worst.total) worst = cand;
-    ranked.push(cand);
-    if (ranked.length > topN * 4) {
-      ranked.sort((a, b) => b.total - a.total);
-      ranked.length = topN;
+    if (rankBy === "expected" && evaluated <= prefilterFrom) setEv(cand, simulateExpected(data, candidatePreset, { samples: evSamples, seed: evSeed }), wheelScale);
+    pool.push(cand);
+    if (rankBy !== "expected") {
+      if (!best || cand.total > best.total) best = cand;
+      if (!worst || cand.total < worst.total) worst = cand;
     }
   }
-  ranked.sort((a, b) => b.total - a.total);
+  let ranked: ScheduleCandidate[] = pool;
+  if (rankBy === "expected") {
+    // Large spaces: keep the `prefilter` best by the deterministic total, then Monte Carlo-screen only those.
+    if (pool.length > prefilterFrom) {
+      ranked = [...pool].sort((a, b) => b.total - a.total).slice(0, prefilter);
+      for (const c of ranked) if (!c.ev) setEv(c, simulateExpected(data, schedulePreset(c), { samples: evSamples, seed: evSeed }), wheelScale);
+    }
+    ranked.sort((a, b) => key(b) - key(a));
+    worst = ranked[ranked.length - 1] ?? null;
+    if (refineTop > 0 && refineSamples > evSamples) {
+      // Refine: re-estimate the screened leaders with more samples (same seed → common random numbers), then re-rank.
+      ranked = ranked.slice(0, refineTop);
+      for (const c of ranked) setEv(c, simulateExpected(data, schedulePreset(c), { samples: refineSamples, seed: evSeed }), wheelScale);
+      ranked.sort((a, b) => key(b) - key(a));
+    }
+    best = ranked[0] ?? null;
+  } else {
+    ranked.sort((a, b) => b.total - a.total);
+  }
   const top = ranked.slice(0, topN);
   let bestResult: SimulationResult | null = null;
   if (best) {
@@ -143,5 +210,10 @@ export function optimizeSchedule(
       { coinMode: opts.coinMode ?? "allHeads" },
     );
   }
-  return { slots, turns, evaluated, truncated, best, worst, top, bestResult };
+  return { slots, turns, evaluated, truncated, best, worst, top, bestResult, rankBy, elapsedMs: Date.now() - t0 };
+}
+
+function setEv(c: ScheduleCandidate, s: MonteCarloStats, wheelScale: number): void {
+  c.ev = { samples: s.samples, mean: s.mean, std: s.std, p10: s.p10, p50: s.p50, p90: s.p90 };
+  c.evWheel = Math.round(s.mean * wheelScale * 10) / 10;
 }

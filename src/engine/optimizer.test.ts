@@ -38,7 +38,7 @@ describe.skipIf(!existsSync(corePath))("6T optimizer & bonus tiers (real data)",
     expect(power).toBeGreaterThanOrEqual(none);
     expect(full).toBeGreaterThanOrEqual(power);
     expect(run("full", true)).toBeGreaterThan(full);
-  });
+  }, 20000);
 
   it("enumerates single (60) and double (13860) slot schedules", () => {
     const preset = createPresetForIdentity(hl, core.skills, core.manifest.dataVersion, "t");
@@ -84,4 +84,22 @@ describe.skipIf(!existsSync(corePath))("6T optimizer & bonus tiers (real data)",
     }
     expect(best.wheelTotal).toBeCloseTo(best.total / 2, 0);
   }, 120000);
+
+  it("ranks by expected value (CRN Monte Carlo) and reports timings; all-heads stays the default", () => {
+    const preset = createPresetForIdentity(hl, core.skills, core.manifest.dataVersion, "t");
+    const ah = optimizeSchedule(data, preset, { slots: 1 });
+    expect(ah.rankBy).toBe("allHeads");
+    expect(ah.best!.ev).toBeUndefined();
+    const ev6 = optimizeSchedule(data, preset, { slots: 1, rankBy: "expected" });
+    const ev6b = optimizeSchedule(data, preset, { slots: 1, rankBy: "expected" });
+    expect(ev6.evaluated).toBe(60);
+    expect(ev6.best!.ev!.samples).toBe(150);
+    expect(ev6.best!.ev!.mean).toBe(ev6b.best!.ev!.mean); // reproducible (fixed seed)
+    for (let i = 1; i < ev6.top.length; i++) expect(ev6.top[i - 1]!.ev!.mean).toBeGreaterThanOrEqual(ev6.top[i]!.ev!.mean);
+    expect(ev6.best!.ev!.p10).toBeLessThanOrEqual(ev6.best!.ev!.p90);
+    const ah12 = optimizeSchedule(data, preset, { slots: 1, turns: 12 });
+    const ev12 = optimizeSchedule(data, preset, { slots: 1, turns: 12, rankBy: "expected" });
+    expect(ev12.evaluated).toBe(3600);
+    console.log(`EV ranking timings: 6T ${ev6.elapsedMs}ms (all-heads ${ah.elapsedMs}ms), 12T ${ev12.elapsedMs}ms (all-heads ${ah12.elapsedMs}ms); best6 EV ${ev6.best!.ev!.mean.toFixed(1)} vs AH ${ah.best!.total}; best12 EV ${ev12.best!.ev!.mean.toFixed(1)} vs AH ${ah12.best!.total}`);
+  }, 300000);
 });

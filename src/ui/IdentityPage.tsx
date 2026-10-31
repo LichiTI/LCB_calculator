@@ -1,4 +1,6 @@
 import { useMemo, useState, type CSSProperties } from "react";
+import { passiveLogic, scriptImpact } from "../engine/logic-meta";
+import { MODELLED_PASSIVES } from "../engine/simulator";
 import type { CoreData, NamedText, SkillText, TextResolver } from "../data/game-data";
 import type { NormalizedIdentity, NormalizedSkill } from "../config/game-data";
 import { DOT_IDS, RESOURCE_SIN_IDS } from "../config/status-terms";
@@ -139,10 +141,29 @@ function SinChip({ attr }: { attr?: string }) {
   );
 }
 
-function StatusBadge({ status }: { status: EffectStatus }) {
-  if (status === "verified") return <span className="tag ok">已验证</span>;
+function PassiveBadge({ pid }: { pid: number }) {
+  if (MODELLED_PASSIVES.has(pid)) return <span className="tag ok">已建模</span>;
+  const info = passiveLogic(pid);
+  if (info?.impact === "none") return <span className="tag" title={info.reason}>不影响伤害</span>;
+  if (info?.impact === "untriggered") return <span className="tag" title={info.reason}>单方面出手不触发</span>;
+  return <span className="tag warn" title={info?.dependsOnAlly ? "部分效果依赖队友在场" : undefined}>未建模{info?.dependsOnAlly ? "（含队友联动）" : ""}</span>;
+}
+
+type ScriptStatus = EffectStatus | "none" | "untriggered";
+
+function StatusBadge({ status }: { status: ScriptStatus }) {
+  if (status === "verified") return <span className="tag ok">已建模</span>;
   if (status === "cosmetic") return <span className="tag">仅演出</span>;
-  return <span className="tag warn">需手动补偿</span>;
+  if (status === "none") return <span className="tag" title="根据游戏逻辑，只影响理智 / 回复 / 护盾 / 拼点威力 / 目标选择">不影响伤害</span>;
+  if (status === "untriggered") return <span className="tag" title="只在拼点胜负、击杀、受击等情况下触发">单方面出手不触发</span>;
+  return <span className="tag warn">未建模</span>;
+}
+
+/** Unverified scripts that cannot change damage are shown as harmless instead of "未建模". */
+function withImpact(status: EffectStatus, name: string, scope: "skill" | "coin"): ScriptStatus {
+  if (status !== "unverified") return status;
+  const i = scriptImpact(name, scope);
+  return i === "damage" ? "unverified" : i;
 }
 
 export function SkillCard({ skill, text, tag }: { skill: NormalizedSkill; text: TextResolver; tag: string }) {
@@ -154,13 +175,13 @@ export function SkillCard({ skill, text, tag }: { skill: NormalizedSkill; text: 
     const skillRows = skill.abilityScripts.map((s) => ({
       where: "技能效果",
       scriptName: s.scriptName,
-      status: classifySkillScript(s),
+      status: withImpact(classifySkillScript(s), s.scriptName, "skill"),
     }));
     const coinRows = skill.coins.flatMap((c) =>
       classifyCoinScripts(c.abilityScriptList ?? [], skill.id, c.index).map((o) => ({
         where: `硬币 ${c.index + 1}`,
         scriptName: o.scriptName,
-        status: o.status,
+        status: withImpact(o.status, o.scriptName, "coin"),
       })),
     );
     return [...skillRows, ...coinRows];
@@ -182,12 +203,12 @@ export function SkillCard({ skill, text, tag }: { skill: NormalizedSkill; text: 
         <span className="meta">
           {scripts.length > 0 &&
             (unverifiedCount === 0 ? (
-              <span className="tag ok" title="所有非演出效果脚本均已通过逆向建模">
+              <span className="tag ok" title="所有影响伤害的效果均已建模">
                 效果已全覆盖 ({verifiedCount}/{scripts.length})
               </span>
             ) : (
               <span className="tag warn" title="含未自动建模的效果脚本，计算时会在缺口列表中提示">
-                含 {unverifiedCount} 项待手动补偿
+                含 {unverifiedCount} 项影响伤害的效果未建模
               </span>
             ))}
           <span className="muted small">#{skill.id}</span>
@@ -286,9 +307,7 @@ function PassiveBlock({ ids, kind, core, text }: { ids: number[]; kind: string; 
               ))}
               {r.missing && <span className="tag warn">{r.fromFallback ? "缺译" : "无文本"}</span>}
               <span className="meta">
-                <span className="tag" title="被动默认不自动触发，可通过技能组手动修正补偿">
-                  手动修正补偿
-                </span>
+                <PassiveBadge pid={pid} />
                 <span className="muted small">#{pid}</span>
               </span>
             </div>
