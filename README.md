@@ -26,19 +26,25 @@ Python 依赖（UnityPy、jsonschema）会在第一次运行时自动安装。
 
 ### 2. 下载计算器
 
-**方式 A（推荐，方便以后更新）**：装好 [Git](https://git-scm.com/download/win) 后，在任意文件夹里运行
+**方式 A（推荐，最省事）：下载发布包**
+
+打开 [Releases 页面](https://github.com/LichiTI/LCB_calculator/releases/latest)，下载 `LCB_calculator-vX.Y.Z.zip`，解压到任意位置。
+
+发布包里的网页已经预先构建好，不需要安装任何 Node 依赖，第一次启动只做「从你的游戏里提取数据」这一步。包里**不含任何游戏数据**。
+
+**方式 B（想用最新开发版 / 想用 git 更新）**：装好 [Git](https://git-scm.com/download/win) 后运行
 
 ```bat
-git clone https://github.com/<作者>/limbus-uptie4-calculator.git
+git clone https://github.com/LichiTI/LCB_calculator.git
 ```
 
-**方式 B**：在 GitHub 页面点 `Code → Download ZIP`，解压到任意位置。
+这种方式第一次启动还会自动安装 Node 依赖并构建网页（需要联网，多 1–2 分钟）。
 
-> 推荐直接放在游戏目录里，例如 `…\steamapps\common\Limbus Company\calculator`，这样不用配置任何路径。放在别处也可以，程序会自动从 Steam 库里找游戏。
+> 推荐直接放在游戏目录里，例如 `…\steamapps\common\Limbus Company\LCB_calculator`，这样不用配置任何路径。放在别处也可以，程序会自动从 Steam 库里找游戏。路径里有中文或空格也没关系。
 
 ### 3. 双击 `启动计算器.bat`
 
-- 第一次运行会自动：安装依赖 → 从游戏提取数据 → 读取汉化 → 构建网页，大约 2–5 分钟。
+- 第一次运行会自动：从游戏提取数据 → 读取汉化 → 打包到网页，发布包约 1–3 分钟（方式 B 还要加上安装依赖和构建）。
 - 之后每次双击都是秒开，浏览器会自动打开 `http://localhost:5173`。
 - 用完关掉黑色窗口就行。
 
@@ -48,13 +54,18 @@ git clone https://github.com/<作者>/limbus-uptie4-calculator.git
 
 ## 更新
 
-双击 `更新计算器.bat`，按提示选：
+**计算器本身有新版本时**
+
+- 发布包用户：到 [Releases](https://github.com/LichiTI/LCB_calculator/releases) 下载新版 zip，解压覆盖旧文件夹（或解压到新文件夹后双击 `启动计算器.bat`，会重新提取一次数据）。浏览器里保存的配置不受影响。
+- git 用户：双击 `更新计算器.bat` 选 3。
+
+**游戏或汉化更新后**：双击 `更新计算器.bat`，按提示选：
 
 | 选项 | 什么时候用 | 做了什么 |
 | --- | --- | --- |
-| 1. 全部更新 | **游戏更新后**（新人格、数值调整） | 拉取最新计算器代码 + 重新提取游戏数据 + 重建汉化 + 构建 |
+| 1. 全部更新 | **游戏更新后**（新人格、数值调整） | 拉取最新计算器代码（仅 git 用户）+ 重新提取游戏数据 + 重建汉化 + 打包 |
 | 2. 只更新汉化 | **汉化包更新 / 换了汉化**之后 | 重新读取 `LimbusCompany_Data/Lang` 下所有汉化，最快 |
-| 3. 只更新计算器代码 | GitHub 上有新版本时 | `git pull` + 更新依赖 + 构建（不碰游戏数据） |
+| 3. 只更新计算器代码 | GitHub 上有新版本时（仅 git 用户） | `git pull` + 更新依赖 + 构建（不碰游戏数据） |
 | 4. 只重新提取游戏数据 | 不想联网时 | 同 1，但不拉取代码 |
 
 - 游戏更新后请**先进一次游戏**，等它下载完资源，再运行更新。

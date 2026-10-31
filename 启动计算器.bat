@@ -10,7 +10,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "dist\index.html" (
+if not exist "dist\data\core.json" (
   echo First run: extracting game data and building the web app, about 2-5 minutes...
   node scripts\update.mjs --mode data
   if errorlevel 1 (

@@ -78,6 +78,11 @@ if (!noPull) {
 }
 
 // 2. node deps
+// Release-package mode: the zip ships a prebuilt dist/ (app only, no game data) and no node_modules,
+// so users only need Node + Python. Skip dependency install and the vite build; just refresh dist/data.
+const prebuilt = existsSync(join(root, "dist", "index.html")) && !existsSync(join(root, "node_modules")) && existsSync(join(root, "RELEASE_PACKAGE"));
+if (prebuilt) console.log("\n[依赖] 发布包模式：网页已预先构建，跳过 Node 依赖安装。");
+else {
 step("依赖", "检查 Node 依赖");
 // The project is locked with pnpm (pnpm-lock.yaml); use a global pnpm if present, otherwise run it through npx.
 const lockFile = join(root, "pnpm-lock.yaml");
@@ -92,6 +97,7 @@ if (!existsSync(join(root, "node_modules", ".pnpm")) || !existsSync(stamp) || re
   if (!run(pnpm[0], [...pnpm[1], "install", "--frozen-lockfile"])) fail("依赖安装失败，请检查网络（国内可先执行 npm config set registry https://registry.npmmirror.com）");
   writeFileSync(stamp, pkgHash);
 } else console.log("  依赖已是最新。");
+}
 
 // 3. game data / translations
 const haveNormalized = existsSync(join(root, "data", "normalized", "identities.json"));
@@ -126,7 +132,11 @@ if (needText) {
 }
 
 // 4. build
-step("构建", "打包网页到 dist/");
+step("构建", prebuilt ? "打包游戏数据到 dist/data" : "打包网页到 dist/");
 if (!run("node", ["scripts/build-data.mjs"])) fail("数据打包失败");
-if (!run("npx", ["vite", "build", "--logLevel", "warn"])) fail("网页构建失败");
+if (prebuilt) {
+  const { cpSync, rmSync } = await import("node:fs");
+  rmSync(join(root, "dist", "data"), { recursive: true, force: true });
+  cpSync(join(root, "public", "data"), join(root, "dist", "data"), { recursive: true });
+} else if (!run("npx", ["vite", "build", "--logLevel", "warn"])) fail("网页构建失败");
 console.log("\n完成！双击「启动计算器.bat」即可使用。");

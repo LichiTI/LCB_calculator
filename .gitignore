@@ -30,3 +30,4 @@ tmp-*
 /hc.json
 /snap.json
 /totals.json
+/release-dist/
