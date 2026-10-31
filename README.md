@@ -142,6 +142,16 @@ python tools\import-game\build_text.py :: 只重建汉化文本
 - 游戏目录、汉化目录、缓存都只读，所有生成的内容只写进本目录。
 - `data/raw`、`data/normalized`、`public/data`、`dist` 都是本机产物，**不入库**（含游戏版权内容）。
 
+## 许可协议
+
+本仓库的原创代码与文档采用 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans)（署名-非商业性使用-相同方式共享 4.0 国际）许可，全文见 [LICENSE](LICENSE)。
+
+- **署名**：转载、修改或再发布时需注明原作者 LichiTI 及仓库地址 <https://github.com/LichiTI/LCB_calculator>，并说明是否做了修改。
+- **非商业性使用**：不得用于商业目的（例如收费分发、付费功能、商业广告变现）。
+- **相同方式共享**：基于本项目修改后再发布，须使用相同协议。
+
+本协议只覆盖本仓库的原创内容；Limbus Company 的名称、游戏数据、图像与文本归 Project Moon 所有，不在授权范围内。第三方依赖遵循各自的许可证。
+
 ## 免责声明
 
 非官方粉丝工具，与 Project Moon 无关。Limbus Company 及相关素材版权归 Project Moon 所有。本仓库只包含计算器代码，不分发游戏文件、游戏数据或汉化文本。
