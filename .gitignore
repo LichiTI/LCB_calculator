@@ -22,3 +22,11 @@ __pycache__/
 tmp-*
 *.log
 
+
+# temp dumps from analysis runs
+/audit.json
+/base-totals.json
+/faust-dump.json
+/hc.json
+/snap.json
+/totals.json
