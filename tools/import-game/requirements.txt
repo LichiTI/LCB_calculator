@@ -1,0 +1,2 @@
+UnityPy>=1.20
+jsonschema>=4.20

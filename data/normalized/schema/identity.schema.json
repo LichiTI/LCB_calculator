@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "identity.schema.json",
+  "title": "NormalizedIdentity (uptie IV)",
+  "type": "object",
+  "required": ["id", "characterId", "uptie", "hp", "defCorrection", "speed", "staggerThresholdsPct", "atkResist",
+               "skillPool", "defenseSkillIds", "battlePassiveIds", "supportPassiveIds", "initBuffs", "provenance"],
+  "properties": {
+    "id": {"type": "integer", "minimum": 10000, "maximum": 19999},
+    "characterId": {"type": "integer", "minimum": 1, "maximum": 12},
+    "uptie": {"const": 4},
+    "hp": {"type": "object", "required": ["base", "perLevel"],
+           "properties": {"base": {"type": "number"}, "perLevel": {"type": "number"}}},
+    "defCorrection": {"type": "integer"},
+    "speed": {"type": "object", "required": ["min", "max"],
+              "properties": {"min": {"type": "integer"}, "max": {"type": "integer"}}},
+    "staggerThresholdsPct": {"type": "array", "items": {"type": "number"}},
+    "atkResist": {"type": "object", "propertyNames": {"enum": ["SLASH", "PENETRATE", "HIT"]},
+                  "additionalProperties": {"type": "number"}},
+    "skillPool": {"type": "array", "minItems": 1, "items": {
+      "type": "object", "required": ["skillId", "count"],
+      "properties": {"skillId": {"type": "integer"}, "count": {"type": "integer", "minimum": 0}}}},
+    "defenseSkillIds": {"type": "array", "items": {"type": "integer"}},
+    "battlePassiveIds": {"type": "array", "items": {"type": "integer"}},
+    "supportPassiveIds": {"type": "array", "items": {"type": "integer"}},
+    "initBuffs": {"type": "array", "items": {"type": "object", "required": ["buff"]}},
+    "provenance": {"type": "object", "required": ["file"]}
+  }
+}

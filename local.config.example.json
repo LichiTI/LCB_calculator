@@ -1,0 +1,9 @@
+{
+  "gameRoot": "auto",
+  "translationPacks": "auto",
+  "extraTranslationPacks": {},
+  "persistentDataPath": "%USERPROFILE%/AppData/LocalLow/ProjectMoon/LimbusCompany",
+  "unityCachePath": "%USERPROFILE%/AppData/LocalLow/Unity/ProjectMoon_LimbusCompany",
+  "originalLocalize": "LimbusCompany_Data/Assets/Resources_moved/Localize",
+  "excludeDirNames": ["_grad_backup", "_fixwork", "_tr_work", "_tr_batch3", "__pycache__", "汉化更新工具"]
+}

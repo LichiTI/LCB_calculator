@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calculator-preset.schema.json",
+  "title": "Calculator preset (schemaVersion 1)",
+  "description": "Structure only. Semantic checks (coin array length vs. game data, unknown IDs) live in validatePreset(). Unknown properties are allowed and preserved; validatePreset reports them.",
+  "type": "object",
+  "required": ["schemaVersion", "presetId", "name", "dataVersion", "rulesVersion", "actor", "skillGroups", "scenario", "simulation"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "presetId": {"type": "string", "minLength": 1},
+    "name": {"type": "string"},
+    "templateOnly": {"type": "boolean"},
+    "dataVersion": {"type": ["string", "null"]},
+    "rulesVersion": {"type": ["string", "null"]},
+    "notes": {"type": "array", "items": {"type": "string"}},
+    "presentation": {
+      "type": "object",
+      "properties": {
+        "translationPack": {"type": "string"},
+        "selectableTranslationPacks": {"type": "array", "items": {"type": "string"}},
+        "fallbackLanguage": {"type": "string"},
+        "showMissingTranslation": {"type": "boolean"}
+      }
+    },
+    "actor": {
+      "type": "object",
+      "required": ["identityId", "uptie", "level"],
+      "properties": {
+        "identityId": {"type": "integer"},
+        "uptie": {"const": 4},
+        "level": {"type": ["integer", "null"], "minimum": 1},
+        "initialSp": {"type": ["integer", "null"], "minimum": -45, "maximum": 45},
+        "initialStatuses": {"type": "array"},
+        "initialResources": {"type": "object"},
+        "battlePassives": {"enum": ["automatic", "none"]},
+        "supportPassiveIds": {"type": "array", "items": {"type": "integer"}},
+        "disabledEffectIds": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "skillGroups": {
+      "type": "object",
+      "required": ["base", "followUps"],
+      "properties": {
+        "base": {"type": "array", "items": {"$ref": "#/$defs/baseEntry"}},
+        "followUps": {"type": "array", "items": {"$ref": "#/$defs/followUpEntry"}}
+      }
+    },
+    "scenario": {"type": "object"},
+    "reporting": {
+      "type": "object",
+      "properties": {
+        "separateDotDamage": {"type": "boolean"},
+        "dotBreakdownBy": {"type": "array", "items": {"enum": ["statusId", "turn", "source"]}},
+        "includeStatusApplications": {"type": "boolean"}
+      }
+    },
+    "simulation": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["staticCycle", "orderedCycle", "multiTurn"]},
+        "initialStatePolicy": {"enum": ["byMode", "resetEachAction", "carryOver"]},
+        "turnCount": {"type": "integer", "minimum": 1},
+        "seed": {"type": "integer"},
+        "samples": {"type": "integer", "minimum": 1},
+        "actionSchedule": {"type": "array", "items": {
+          "type": "object", "required": ["turn", "order", "entryId"],
+          "properties": {"turn": {"type": "integer", "minimum": 1}, "order": {"type": "integer", "minimum": 1},
+                         "entryId": {"type": "string"}}}}
+      }
+    }
+  },
+  "$defs": {
+    "nonNegInt": {"type": "integer", "minimum": 0},
+    "statusAmount": {
+      "type": "object",
+      "required": ["potency", "count"],
+      "additionalProperties": false,
+      "properties": {"potency": {"$ref": "#/$defs/nonNegInt"}, "count": {"$ref": "#/$defs/nonNegInt"}}
+    },
+    "dotMap": {"type": "object", "additionalProperties": {"$ref": "#/$defs/statusAmount"}},
+    "extraDamage": {
+      "type": "object",
+      "required": ["fixedDamage", "ratioPct", "reference", "trigger", "modifierPolicy", "canTriggerOnHit"],
+      "properties": {
+        "fixedDamage": {"type": "number"},
+        "ratioPct": {"type": "number"},
+        "reference": {"enum": ["resolvedHitDamage", "actualHpLost"]},
+        "trigger": {"enum": ["afterEachLandedCoin", "afterSkill"]},
+        "modifierPolicy": {"enum": ["fixed", "sinResistance", "reuseRule"]},
+        "canTriggerOnHit": {"type": "boolean"}
+      }
+    },
+    "modifiers": {
+      "type": "object",
+      "required": ["basePower", "totalCoinPowerDelta", "totalDamageBonusPct", "totalExtraDamage"],
+      "properties": {
+        "basePower": {"type": ["integer", "null"]},
+        "totalCoinPowerDelta": {"type": "integer"},
+        "totalDamageBonusPct": {"type": "number"},
+        "manualDamageBucket": {"type": "string"},
+        "totalExtraDamage": {"$ref": "#/$defs/extraDamage"},
+        "coinPowerDeltas": {"type": "array", "items": {"type": "integer"}},
+        "coinDamageBonusPcts": {"type": "array", "items": {"type": "number"}},
+        "coinDots": {"type": "array", "items": {"$ref": "#/$defs/dotMap"}}
+      }
+    },
+    "baseEntry": {
+      "allOf": [{"$ref": "#/$defs/modifiers"}],
+      "type": "object",
+      "required": ["entryId", "skillId", "usesPerCycle"],
+      "properties": {
+        "entryId": {"type": "string", "minLength": 1},
+        "skillId": {"type": "integer"},
+        "slot": {"type": "string"},
+        "displayNameHint": {"type": "string"},
+        "usesPerCycle": {"$ref": "#/$defs/nonNegInt"}
+      }
+    },
+    "followUpEntry": {
+      "allOf": [{"$ref": "#/$defs/modifiers"}],
+      "type": "object",
+      "required": ["entryId", "enabled", "skillId", "trigger", "maxChainDepth"],
+      "properties": {
+        "entryId": {"type": "string", "minLength": 1},
+        "enabled": {"type": "boolean"},
+        "origin": {"enum": ["manual", "automatic"]},
+        "sourceEffectId": {"type": ["string", "null"]},
+        "skillId": {"type": ["integer", "null"]},
+        "trigger": {
+          "type": "object",
+          "required": ["event", "sourceEntryIds", "chance", "maxPerSourceAction"],
+          "properties": {
+            "event": {"type": "string"},
+            "sourceEntryIds": {"type": "array", "items": {"type": "string"}},
+            "chance": {"type": "number", "minimum": 0, "maximum": 1},
+            "maxPerSourceAction": {"type": "integer", "minimum": 1}
+          }
+        },
+        "targetSelector": {"type": "string"},
+        "countsTowardBaseCycle": {"type": "boolean"},
+        "actionSlotCost": {"$ref": "#/$defs/nonNegInt"},
+        "resourceCosts": {"type": "object"},
+        "inheritBattleState": {"type": "boolean"},
+        "allowTriggeringOtherFollowUps": {"type": "boolean"},
+        "maxChainDepth": {"type": "integer", "minimum": 0, "maximum": 8}
+      }
+    }
+  }
+}

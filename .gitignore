@@ -1,0 +1,24 @@
+# Extracted game data stays local (copyrighted, large, reproducible via importer)
+data/raw/
+data/normalized/*.json
+data/normalized/text/
+!data/normalized/schema/
+data/reports/*.json
+data/reports/*.md
+local.config.json
+
+node_modules/
+dist/
+public/data/
+*.tsbuildinfo
+data/il2cpp/
+tools/bin/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# local scratch
+tmp-*
+*.log
+
